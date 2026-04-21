@@ -1,0 +1,48 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  passkeys  Passkey[]
+  createdAt DateTime @default(now())
+}
+
+model Passkey {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  credentialId String   @unique
+  publicKey    String
+  counter      Int
+
+  transports   String?
+
+  createdAt    DateTime @default(now())
+}
+
+model Challenge {
+  id         String   @id @default(cuid())
+  userId     String?
+  email      String?
+  type       String
+  challenge  String
+  expiresAt  DateTime
+  used       Boolean  @default(false)
+  createdAt  DateTime @default(now())
+}
+
+model MagicOtp {
+  id         String   @id @default(cuid())
+  email      String
+  codeHash   String
+  expiresAt  DateTime
+  used       Boolean @default(false)
+}
