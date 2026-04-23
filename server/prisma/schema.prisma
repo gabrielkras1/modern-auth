@@ -7,20 +7,19 @@ datasource db {
   url      = "file:./dev.db"
 }
 
-
 model User {
-  id    String @id @default(uuid())
-  email String @unique
-  otp   String?
+  id             String          @id @default(uuid())
+  email          String          @unique
+  otp            String?
   authenticators Authenticator[]
 }
 
 model Authenticator {
-  credentialID         Bytes  @unique
+  credentialID         Bytes   @unique
   credentialPublicKey  Bytes
   counter              BigInt
   credentialDeviceType String
   credentialBackedUp   Boolean
   userId               String
-  user                 User   @relation(fields: [userId], references: [id])
+  user                 User    @relation(fields: [userId], references: [id])
 }

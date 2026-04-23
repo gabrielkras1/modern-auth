@@ -8,6 +8,7 @@ import {
   generateAuthenticationOptions,
   verifyAuthenticationResponse,
 } from '@simplewebauthn/server';
+import { isoBase64URL } from '@simplewebauthn/server/helpers';
 
 const app = express();
 const prisma = new PrismaClient();
@@ -19,12 +20,11 @@ const rpID = 'localhost';
 const origin = 'http://localhost:5173';
 const JWT_SECRET = 'SECRET_DO_PROFESSOR_COBROU';
 
-// ⚠️ Em produção usar Redis/Session
-(global as any).currentChallenge = '';
-(global as any).currentUserId = '';
+// Armazena challenges temporários
+const challengeSessions = new Map<string, { challenge: string; userId: string }>();
 
 /* ======================================================
-   REGISTRO
+   REGISTRO (PASSKEY)
 ====================================================== */
 
 app.get('/register/options', async (req, res) => {
@@ -35,29 +35,34 @@ app.get('/register/options', async (req, res) => {
       return res.status(400).json({ error: 'Email obrigatório' });
     }
 
-    let user = await prisma.user.findUnique({ where: { email } });
+    let user = await prisma.user.findUnique({
+      where: { email },
+      include: { authenticators: true },
+    });
 
     if (!user) {
-      user = await prisma.user.create({ data: { email } });
+      user = await prisma.user.create({
+        data: { email },
+        include: { authenticators: true },
+      });
     }
 
     const options = await generateRegistrationOptions({
-      rpName: 'Projeto FIDO2 Gabriel',
+      rpName: 'Auth Gabriel v3',
       rpID,
-      userID: Buffer.from(user.id),
+      userID: new TextEncoder().encode(user.id), // ✅ CORRETO
       userName: user.email,
-      userDisplayName: user.email,
       attestationType: 'none',
       authenticatorSelection: {
+        userVerification: 'required',
         residentKey: 'required',
-        userVerification: 'preferred',
       },
     });
 
-    (global as any).currentChallenge = options.challenge;
-    (global as any).currentUserId = user.id;
-
-    console.log('✅ Challenge registro:', options.challenge);
+    challengeSessions.set(user.id, {
+      challenge: options.challenge,
+      userId: user.id,
+    });
 
     res.json(options);
   } catch (error: any) {
@@ -67,81 +72,85 @@ app.get('/register/options', async (req, res) => {
 
 app.post('/register/verify', async (req, res) => {
   try {
-    const { body } = req;
+    const { body, email } = req.body;
 
-    const expectedChallenge = (global as any).currentChallenge;
-    const userId = (global as any).currentUserId;
+    const user = await prisma.user.findUnique({
+      where: { email },
+    });
+
+    const session = challengeSessions.get(user?.id || '');
+
+    if (!session || !user) {
+      return res.status(400).json({ error: 'Sessão expirada' });
+    }
 
     const verification = await verifyRegistrationResponse({
       response: body,
-      expectedChallenge,
+      expectedChallenge: session.challenge,
       expectedOrigin: origin,
       expectedRPID: rpID,
     });
 
-    if (!verification.verified || !verification.registrationInfo) {
-      return res.status(400).json({ error: 'Falha no registro' });
+    if (verification.verified && verification.registrationInfo) {
+      const {
+        credentialID,
+        credentialPublicKey,
+        counter,
+        credentialDeviceType,
+        credentialBackedUp,
+      } = verification.registrationInfo;
+
+      await prisma.authenticator.create({
+        data: {
+          credentialID: Buffer.from(credentialID),
+          credentialPublicKey: Buffer.from(credentialPublicKey),
+          counter: BigInt(counter),
+          credentialDeviceType,
+          credentialBackedUp,
+          userId: user.id,
+        },
+      });
+
+      challengeSessions.delete(user.id);
+
+      return res.json({ success: true });
     }
 
-const regInfo = verification.registrationInfo;
-
-await prisma.authenticator.create({
-  data: {
-    credentialID: Buffer.from(regInfo.credentialID),
-    credentialPublicKey: Buffer.from(regInfo.credentialPublicKey),
-    counter: BigInt(regInfo.counter),
-    credentialDeviceType: regInfo.credentialDeviceType,
-    credentialBackedUp: regInfo.credentialBackedUp,
-    userId,
-  },
-});
-
-    console.log('✅ Passkey registrada');
-
-    res.json({ success: true });
+    return res.status(400).json({ error: 'Falha na verificação' });
   } catch (error: any) {
-    console.error('❌ Registro erro:', error);
-    res.status(500).json({ error: error.message });
+    res.status(400).json({ error: error.message });
   }
 });
 
 /* ======================================================
-   LOGIN
+   LOGIN (PASSKEY)
 ====================================================== */
 
 app.get('/login/options', async (req, res) => {
   try {
     const { email } = req.query;
 
-    if (!email || typeof email !== 'string') {
-      return res.status(400).json({ error: 'Email obrigatório' });
-    }
-
     const user = await prisma.user.findUnique({
-      where: { email },
+      where: { email: email as string },
       include: { authenticators: true },
     });
 
     if (!user || user.authenticators.length === 0) {
-      return res.status(404).json({ error: 'Sem biometria' });
+      return res.status(404).json({
+        error: 'Nenhuma Passkey encontrada para este email.',
+      });
     }
 
     const options = await generateAuthenticationOptions({
       rpID,
-allowCredentials: [
-  {
-    id: user.authenticators[0].credentialID.toString('base64url'),
-    type: 'public-key',
-    transports: ['internal'],
-  },
-],
-      userVerification: 'preferred',
+
+      userVerification: 'required',
     });
 
-    (global as any).currentChallenge = options.challenge;
-    (global as any).currentUserId = user.id;
-
-    console.log('✅ Challenge login:', options.challenge);
+    challengeSessions.set(user.id, {
+      challenge: options.challenge,
+      userId: user.id,
+    });
 
     res.json(options);
   } catch (error: any) {
@@ -151,55 +160,109 @@ allowCredentials: [
 
 app.post('/login/verify', async (req, res) => {
   try {
-    const { body } = req;
+    const { body, email } = req.body;
 
-    const expectedChallenge = (global as any).currentChallenge;
-    const userId = (global as any).currentUserId;
+const user = await prisma.user.findFirst({
+  where: {
+    authenticators: {
+      some: {
+        credentialID: Buffer.from(isoBase64URL.toBuffer(body.id)),
+      },
+    },
+  },
+  include: { authenticators: true },
+});
 
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      include: { authenticators: true },
-    });
+    const session = challengeSessions.get(user?.id || '');
 
-    if (!user) {
-      return res.status(404).json({ error: 'Usuário não encontrado' });
+    if (!session || !user) {
+      return res.status(400).json({ error: 'Sessão inválida' });
     }
 
-    // 🔥 ESSA LINHA É CRÍTICA
-    const auth = user.authenticators.find(
-      (a) => a.credentialID.toString('base64url') === body.rawId
+    const authenticator = user.authenticators.find(
+      (a) => isoBase64URL.fromBuffer(a.credentialID) === body.id
     );
 
- console.log('👉 IDs banco:', user.authenticators.map(a => a.credentialID.toString('base64url')));
-console.log('👉 body.id:', body.id);
-console.log('👉 body.rawId:', body.rawId);
-
-    if (!auth) {
-      console.error('❌ Authenticator não encontrado');
-      return res.status(404).json({ error: 'Dispositivo não reconhecido' });
+    if (!authenticator) {
+      return res.status(404).json({ error: 'Credencial não reconhecida' });
     }
 
     const verification = await verifyAuthenticationResponse({
       response: body,
-      expectedChallenge,
+      expectedChallenge: session.challenge,
       expectedOrigin: origin,
       expectedRPID: rpID,
       authenticator: {
-        credentialID: auth.credentialID,
-        credentialPublicKey: auth.credentialPublicKey,
-        counter: Number(auth.counter),
+        credentialID: isoBase64URL.fromBuffer(authenticator.credentialID),
+        credentialPublicKey: new Uint8Array(authenticator.credentialPublicKey), // ✅ CORRETO
+        counter: Number(authenticator.counter),
       },
     });
 
-    if (!verification.verified) {
-      return res.status(401).json({ error: 'Assinatura inválida' });
+    if (verification.verified) {
+      await prisma.authenticator.update({
+        where: { credentialID: authenticator.credentialID },
+        data: {
+          counter: BigInt(verification.authenticationInfo.newCounter),
+        },
+      });
+
+      challengeSessions.delete(user.id);
+
+      const token = jwt.sign(
+        { userId: user.id, email: user.email },
+        JWT_SECRET,
+        { expiresIn: '1h' }
+      );
+
+      return res.json({ success: true, token });
     }
 
-    await prisma.authenticator.updateMany({
-      where: { credentialID: auth.credentialID },
-      data: {
-        counter: BigInt(verification.authenticationInfo.newCounter),
-      },
+    return res.status(401).json({ error: 'Falha no login' });
+  } catch (error: any) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+/* ======================================================
+   MAGIC LINK (OTP)
+====================================================== */
+
+app.post('/auth/magic-link', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+
+    await prisma.user.upsert({
+      where: { email },
+      update: { otp },
+      create: { email, otp },
+    });
+
+    console.log(`📧 Código para ${email}: ${otp}`);
+
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ error: 'Erro ao gerar OTP' });
+  }
+});
+
+app.post('/auth/magic-link/verify', async (req, res) => {
+  try {
+    const { email, code } = req.body;
+
+    const user = await prisma.user.findUnique({
+      where: { email },
+    });
+
+    if (!user || user.otp !== code) {
+      return res.status(401).json({ error: 'Código inválido' });
+    }
+
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { otp: null },
     });
 
     const token = jwt.sign(
@@ -209,60 +272,15 @@ console.log('👉 body.rawId:', body.rawId);
     );
 
     res.json({ success: true, token });
-  } catch (error: any) {
-    console.error('❌ LOGIN ERRO:', error);
-    res.status(500).json({ error: error.message });
+  } catch {
+    res.status(500).json({ error: 'Erro na verificação' });
   }
 });
 
 /* ======================================================
-   MAGIC LINK
+   SERVER
 ====================================================== */
 
-app.post('/auth/magic-link', async (req, res) => {
-  const { email } = req.body;
-
-  let user = await prisma.user.findUnique({ where: { email } });
-
-  if (!user) {
-    user = await prisma.user.create({ data: { email } });
-  }
-
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-
-  await prisma.user.update({
-    where: { id: user.id },
-    data: { otp },
-  });
-
-  console.log(`📧 Código para ${email}: ${otp}`);
-
-  res.json({ success: true });
-});
-
-app.post('/auth/magic-link/verify', async (req, res) => {
-  const { email, code } = req.body;
-
-  const user = await prisma.user.findUnique({ where: { email } });
-
-  if (!user || user.otp !== code) {
-    return res.status(401).json({ error: 'Código inválido' });
-  }
-
-  await prisma.user.update({
-    where: { id: user.id },
-    data: { otp: null },
-  });
-
-  const token = jwt.sign(
-    { userId: user.id, email: user.email },
-    JWT_SECRET,
-    { expiresIn: '1h' }
-  );
-
-  res.json({ success: true, token });
-});
-
 app.listen(3001, () => {
-  console.log('🚀 Servidor rodando em http://localhost:3001');
+  console.log('🚀 Server rodando em http://localhost:3001');
 });

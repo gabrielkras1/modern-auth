@@ -1,10 +1,12 @@
+import React, { useState } from 'react';
 import { startRegistration, startAuthentication } from '@simplewebauthn/browser';
 import axios from 'axios';
-import { useState } from 'react';
 
-type Screen = 'home' | 'register' | 'login' | 'magic-link';
+// Definição das telas possíveis
+type Screen = 'home' | 'register' | 'login' | 'magic-link' | 'magic-link-verify';
 
-function App() {
+const App: React.FC = () => {
+  // Estados da aplicação
   const [screen, setScreen] = useState<Screen>('home');
   const [email, setEmail] = useState('');
   const [otpCode, setOtpCode] = useState('');
@@ -14,119 +16,67 @@ function App() {
 
   const API_URL = 'http://localhost:3001';
 
-  // ============================================
-  // REGISTRO
-  // ============================================
+  // --- FUNÇÕES DE AUTH ---
 
   const handleRegister = async () => {
-    if (!email) {
-      setMessage('❌ Informe um email');
-      return;
-    }
-
+    if (!email) return setMessage('⚠️ Digite um email primeiro!');
     try {
       setLoading(true);
-      setMessage('⏳ Gerando challenge...');
-
-      const { data: options } = await axios.get(`${API_URL}/register/options`, {
-        params: { email },
-      });
-
-      console.log('REGISTER OPTIONS:', options);
-
-      setMessage('📱 Use sua biometria...');
-
-      const registrationResponse = await startRegistration({
-        optionsJSON: options, // 🔥 CORRETO v10+
-      });
-
-      await axios.post(`${API_URL}/register/verify`, registrationResponse);
-
-      setMessage('✅ Biometria cadastrada!');
-      setEmail('');
-      setTimeout(() => setScreen('home'), 1500);
-
+      setMessage('Buscando opções de registro...');
+      
+      // 1. Pega as opções do servidor
+      const { data: options } = await axios.get(`${API_URL}/register/options`, { params: { email } });
+      
+      // 2. Chama a biometria do navegador (v10 usa optionsJSON)
+      const regResp = await startRegistration({ optionsJSON: options });
+      
+      // 3. Envia a resposta para o servidor verificar
+      await axios.post(`${API_URL}/register/verify`, { body: regResp, email });
+      
+      setMessage('✅ Biometria cadastrada com sucesso!');
+      setTimeout(() => setScreen('home'), 2000);
     } catch (error: any) {
-      console.error('REGISTER ERROR:', error);
-
-      if (error.name === 'NotAllowedError') {
-        setMessage('❌ Biometria cancelada pelo usuário');
-      } else {
-        setMessage(`❌ ${error.response?.data?.error || error.message}`);
-      }
+      console.error(error);
+      setMessage(`❌ Erro no registro: ${error.response?.data?.error || error.message}`);
     } finally {
       setLoading(false);
     }
   };
-
-  // ============================================
-  // LOGIN
-  // ============================================
 
   const handleLogin = async () => {
-    if (!email) {
-      setMessage('❌ Informe um email');
-      return;
-    }
-
+    if (!email) return setMessage('⚠️ Digite um email primeiro!');
     try {
       setLoading(true);
-      setMessage('⏳ Gerando challenge...');
-
-      const { data: options } = await axios.get(`${API_URL}/login/options`, {
-        params: { email },
-      });
-
-      console.log('LOGIN OPTIONS:', options);
-
-      setMessage('📱 Use sua biometria...');
-
-      const authResponse = await startAuthentication({
-        optionsJSON: options, // 🔥 CORRETO v10+
-      });
-
-      const { data } = await axios.post(`${API_URL}/login/verify`, authResponse);
-
+      setMessage('Iniciando biometria...');
+      
+      // 1. Pega as opções de login
+      const { data: options } = await axios.get(`${API_URL}/login/options`, { params: { email } });
+      
+      // 2. Chama a biometria/Passkey
+      const authResp = await startAuthentication({ optionsJSON: options });
+      
+      // 3. Verifica no servidor
+      const { data } = await axios.post(`${API_URL}/login/verify`, { body: authResp, email });
+      
       setToken(data.token);
       setMessage('✅ Login realizado!');
-      setEmail('');
-
-      setTimeout(() => setScreen('home'), 1500);
-
     } catch (error: any) {
-      console.error('LOGIN ERROR:', error);
-
-      if (error.name === 'NotAllowedError') {
-        setMessage('❌ Biometria cancelada ou timeout');
-      } else {
-        setMessage(`❌ ${error.response?.data?.error || error.message}`);
-      }
+      console.error(error);
+      setMessage(`❌ Falha no login: ${error.response?.data?.error || error.message}`);
     } finally {
       setLoading(false);
     }
   };
 
-  // ============================================
-  // MAGIC LINK
-  // ============================================
-
   const handleRequestMagicLink = async () => {
-    if (!email) {
-      setMessage('❌ Informe um email');
-      return;
-    }
-
+    if (!email) return setMessage('⚠️ Digite um email primeiro!');
     try {
       setLoading(true);
-      setMessage('📧 Gerando código...');
-
       await axios.post(`${API_URL}/auth/magic-link`, { email });
-
-      setMessage('✅ Código enviado (veja no console do servidor)');
-      setOtpCode('');
-
+      setScreen('magic-link-verify');
+      setMessage('📧 Código enviado para o console do servidor!');
     } catch (error: any) {
-      setMessage(`❌ ${error.response?.data?.error || error.message}`);
+      setMessage('❌ Erro ao solicitar código');
     } finally {
       setLoading(false);
     }
@@ -135,109 +85,117 @@ function App() {
   const handleVerifyMagicLink = async () => {
     try {
       setLoading(true);
-
-      const { data } = await axios.post(`${API_URL}/auth/magic-link/verify`, {
-        email,
-        code: otpCode,
-      });
-
+      const { data } = await axios.post(`${API_URL}/auth/magic-link/verify`, { email, code: otpCode });
       setToken(data.token);
-      setMessage('✅ Login via código!');
-      setOtpCode('');
-
+      setMessage('✅ Acesso garantido via código!');
     } catch (error: any) {
-      setMessage(`❌ ${error.response?.data?.error || error.message}`);
+      setMessage('❌ Código inválido ou expirado');
     } finally {
       setLoading(false);
     }
   };
 
-  // ============================================
-  // UI
-  // ============================================
+  // --- ESTILOS (CSS-in-JS para não precisar de arquivo extra) ---
 
-  const containerStyle: React.CSSProperties = {
-    height: '100vh',
-    display: 'flex',
-    flexDirection: 'column',
-    justifyContent: 'center',
-    alignItems: 'center',
-    background: '#0f172a',
-    color: '#e2e8f0',
-    gap: '16px',
+  const styles = {
+    container: { height: '100vh', display: 'flex', flexDirection: 'column' as const, justifyContent: 'center', alignItems: 'center', background: '#0f172a', color: '#e2e8f0', fontFamily: 'sans-serif' },
+    card: { background: '#1e293b', padding: '2rem', borderRadius: '12px', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.5)', display: 'flex', flexDirection: 'column' as const, gap: '15px', width: '320px' },
+    input: { padding: '12px', borderRadius: '6px', border: '1px solid #334155', background: '#0f172a', color: 'white', fontSize: '16px' },
+    btn: { padding: '12px', borderRadius: '6px', border: 'none', cursor: 'pointer', fontWeight: 'bold' as const, transition: '0.2s', fontSize: '14px' },
+    btnPrimary: { background: '#3b82f6', color: 'white' },
+    btnSecondary: { background: '#10b981', color: 'white' },
+    btnWarning: { background: '#f59e0b', color: 'white' },
+    btnGhost: { background: '#64748b', color: 'white', marginTop: '10px' },
   };
 
-  const inputStyle: React.CSSProperties = {
-    padding: '10px',
-    width: '280px',
-    borderRadius: '6px',
-    border: '1px solid #334155',
-    background: '#1e293b',
-    color: 'white',
-  };
-
-  const btnStyle: React.CSSProperties = {
-    padding: '10px',
-    width: '280px',
-    borderRadius: '6px',
-    border: 'none',
-    cursor: 'pointer',
-    background: '#3b82f6',
-    color: 'white',
-  };
+  // --- RENDERIZAÇÃO ---
 
   if (token) {
     return (
-      <div style={containerStyle}>
-        <h2>✅ Logado</h2>
-        <code style={{ maxWidth: 400, wordBreak: 'break-all' }}>{token}</code>
-        <button onClick={() => setToken('')} style={btnStyle}>
-          Sair
-        </button>
+      <div style={styles.container}>
+        <div style={styles.card}>
+          <h2 style={{ textAlign: 'center' }}>🎉 Bem-vindo!</h2>
+          <p style={{ fontSize: '12px', wordBreak: 'break-all', color: '#94a3b8' }}>Token: {token.substring(0, 50)}...</p>
+          <button style={{ ...styles.btn, ...styles.btnPrimary }} onClick={() => { setToken(''); setScreen('home'); }}>Sair</button>
+        </div>
       </div>
     );
   }
 
   return (
-    <div style={containerStyle}>
-      <h1>🔐 Auth Moderna</h1>
-
-      <input
-        value={email}
-        onChange={(e) => setEmail(e.target.value)}
-        placeholder="email"
-        style={inputStyle}
-      />
-
-      <button onClick={handleRegister} style={btnStyle}>
-        Registrar
-      </button>
-
-      <button onClick={handleLogin} style={{ ...btnStyle, background: '#10b981' }}>
-        Login
-      </button>
-
-      <button onClick={handleRequestMagicLink} style={{ ...btnStyle, background: '#f59e0b' }}>
-        Magic Link
-      </button>
-
-      {otpCode !== '' && (
-        <>
-          <input
-            value={otpCode}
-            onChange={(e) => setOtpCode(e.target.value)}
-            placeholder="Código"
-            style={inputStyle}
+    <div style={styles.container}>
+      <div style={styles.card}>
+        <h1 style={{ textAlign: 'center', margin: '0 0 10px 0' }}>🔐 Auth Moderna</h1>
+        
+        {/* Input de Email (Sempre visível exceto na verificação de OTP) */}
+        {screen !== 'magic-link-verify' && (
+          <input 
+            style={styles.input} 
+            type="email"
+            value={email} 
+            onChange={e => setEmail(e.target.value)} 
+            placeholder="Seu email institucional" 
           />
-          <button onClick={handleVerifyMagicLink} style={btnStyle}>
-            Verificar Código
-          </button>
-        </>
-      )}
+        )}
 
-      {message && <p>{message}</p>}
+        {/* Lógica de Telas */}
+        {screen === 'home' && (
+          <>
+            <button style={{ ...styles.btn, ...styles.btnPrimary }} onClick={() => setScreen('register')}>Registrar Nova Passkey</button>
+            <button style={{ ...styles.btn, ...styles.btnSecondary }} onClick={() => setScreen('login')}>Entrar com Biometria</button>
+            <button style={{ ...styles.btn, ...styles.btnWarning }} onClick={() => setScreen('magic-link')}>Entrar com Código (OTP)</button>
+          </>
+        )}
+
+        {screen === 'register' && (
+          <button style={{ ...styles.btn, ...styles.btnPrimary }} onClick={handleRegister} disabled={loading}>
+            {loading ? 'Processando...' : 'Criar Credencial Agora'}
+          </button>
+        )}
+
+        {screen === 'login' && (
+          <button style={{ ...styles.btn, ...styles.btnSecondary }} onClick={handleLogin} disabled={loading}>
+            {loading ? 'Aguardando Sensor...' : 'Validar Biometria'}
+          </button>
+        )}
+
+        {screen === 'magic-link' && (
+          <button style={{ ...styles.btn, ...styles.btnWarning }} onClick={handleRequestMagicLink} disabled={loading}>
+            {loading ? 'Enviando...' : 'Receber Código por Email'}
+          </button>
+        )}
+
+        {screen === 'magic-link-verify' && (
+          <>
+            <p style={{ fontSize: '14px', textAlign: 'center' }}>Digite o código enviado para <b>{email}</b></p>
+            <input 
+              style={styles.input} 
+              value={otpCode} 
+              onChange={e => setOtpCode(e.target.value)} 
+              placeholder="000000" 
+              maxLength={6} 
+            />
+            <button style={{ ...styles.btn, ...styles.btnPrimary }} onClick={handleVerifyMagicLink} disabled={loading}>
+              Verificar Código
+            </button>
+          </>
+        )}
+
+        {/* Botão Voltar */}
+        {screen !== 'home' && (
+          <button style={{ ...styles.btn, ...styles.btnGhost }} onClick={() => { setScreen('home'); setMessage(''); }}>
+            Voltar
+          </button>
+        )}
+
+        {message && (
+          <p style={{ fontSize: '12px', textAlign: 'center', marginTop: '10px', color: message.includes('✅') ? '#10b981' : '#f87171' }}>
+            {message}
+          </p>
+        )}
+      </div>
     </div>
   );
-}
+};
 
 export default App;
